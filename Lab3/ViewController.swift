@@ -7,6 +7,7 @@
 
 import UIKit
 import CoreLocation
+import Foundation
 
 // MARK: - Constants
 
@@ -16,7 +17,7 @@ let grayColor = UIColor(red: 227/255, green: 244/255, blue: 254/255, alpha: 1)
 
 let pallateStates: [String: Array<UIColor>] = [
     "1": [yellowColor, grayColor, blueColor],
-    "2": [grayColor, blueColor, yellowColor],
+    "2": [blueColor, yellowColor, grayColor],
 ]
 
 let weatherStates: [String: [String: String]] = [
@@ -214,36 +215,43 @@ let weatherStates: [String: [String: String]] = [
     ]
 ]
 
-struct WeatherResponse: Decodable {
+struct WeatherResponse: Codable {
     let location: Location
     let current: Weather
 }
 
-struct Location: Decodable {
+struct Location: Codable {
     let name: String
+    let country: String
+    let localtime: String
 }
 
-struct Weather: Decodable {
+struct Weather: Codable {
     let temp_f: Float
     let temp_c: Float
     let condition: WeatherCondition
 }
 
-struct WeatherCondition: Decodable {
+struct WeatherCondition: Codable {
     let text: String
     let code: Int
 }
 
+let HistoryScreen = "goToHistory"
+let encoder = PropertyListEncoder()
+let userDocuments = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
+let degreeSymbol = "\u{00B0}"
 
 class ViewController: UIViewController, CLLocationManagerDelegate, UITextFieldDelegate {
     
     // MARK: Outlets
-    
-    @IBOutlet weak var labelMetric: UILabel!
+
     @IBOutlet weak var searchTextField: UITextField!
     @IBOutlet weak var weatherConditionImage: UIImageView!
     @IBOutlet weak var temperatureLabel: UILabel!
     @IBOutlet weak var locationLabel: UILabel!
+    @IBOutlet weak var weatherConditionLabel: UILabel!
+    @IBOutlet weak var measureMode: UISegmentedControl!
     
     // MARK: Properties
     
@@ -251,15 +259,15 @@ class ViewController: UIViewController, CLLocationManagerDelegate, UITextFieldDe
     var myLat = 0.0
     var myLong = 0.0
     var celcius = true
+    private var items: [WeatherResponse] = []
+    var lastResponse: WeatherResponse!
+    
 
     // MARK: Lifecycle
     
     override func viewDidLoad() {
         super.viewDidLoad()
         setupUI()
-        setupLocationManager()
-        loadDefaultWeather()
-        loadWeatherByLocation(latitude: myLat, longitude: myLong)
     }
     
     // MARK: UI Setup
@@ -295,6 +303,20 @@ class ViewController: UIViewController, CLLocationManagerDelegate, UITextFieldDe
         }
     }
     
+    // MARK: Navigation
+    
+    @IBAction func onPressCities(_ sender: UIButton) {
+        print("onPressCities")
+        self.performSegue(withIdentifier: HistoryScreen, sender: self)
+    }
+    
+    override func prepare(for segue: UIStoryboardSegue, sender: Any?) {
+        if segue.identifier == HistoryScreen {
+            let destination = segue.destination as! HistoryViewController
+            destination.currentMode = celcius
+        }
+    }
+    
     // MARK: Weather Loading
     
     private func loadWeatherByLocation(latitude: Double, longitude: Double) {
@@ -307,7 +329,7 @@ class ViewController: UIViewController, CLLocationManagerDelegate, UITextFieldDe
         test(defWeatherCode)
     }
     
-    private func test(_ weatherCode: String) {
+    func test(_ weatherCode: String) {
         guard let weatherState = weatherStates[weatherCode] else {
             print("Invalid weather code: \(weatherCode)")
             return
@@ -325,18 +347,12 @@ class ViewController: UIViewController, CLLocationManagerDelegate, UITextFieldDe
     }
 
     
-    private func getPallate(_ weatherCode: String) -> [UIColor] {
+    func getPallate(_ weatherCode: String) -> [UIColor] {
         return weatherCode == "1000" ? pallateStates["1"]! : pallateStates["2"]!
     }
     
-    @IBAction func toggleSwitch(_ sender: UISwitch) {
-        celcius = sender.isOn
-        labelMetric.text = celcius ? "Convert to fahrenheit" : "Convert to celsius"
-        loadWeather(search: searchTextField.text)
-    }
-    
     @IBAction func onPressLocation(_ sender: UIButton) {
-        locationManager.requestLocation()
+        setupLocationManager()
     }
     
     @IBAction func onPressSearch(_ sender: UIButton) {
@@ -346,6 +362,26 @@ class ViewController: UIViewController, CLLocationManagerDelegate, UITextFieldDe
             print("Invalid search text")
         }
     }
+    
+    @IBAction func onMeasureTypeChanged(_ sender: UISegmentedControl) {
+        let selectedIndex = sender.selectedSegmentIndex
+        celcius = selectedIndex == 0
+        updateUI(with: lastResponse)
+    }
+    
+    // MARK: Update UI
+    
+    private func updateUI(with weatherResponse: WeatherResponse) {
+        locationLabel.text = "\(weatherResponse.location.name)"
+        let temperature = celcius ? "\(weatherResponse.current.temp_c)\(degreeSymbol)C" : "\(weatherResponse.current.temp_f)\(degreeSymbol)F"
+        temperatureLabel.text = temperature
+        searchTextField.text = weatherResponse.location.name
+        weatherConditionLabel.text = weatherResponse.current.condition.text
+        let weatherCode = "\(weatherResponse.current.condition.code)"
+        test(weatherCode)
+    }
+    
+    // MARK: API Call
     
     private func loadWeather(search: String?) {
         guard let search = search else {
@@ -367,24 +403,16 @@ class ViewController: UIViewController, CLLocationManagerDelegate, UITextFieldDe
                 return
             }
             if let weatherResponse = self.parseJson(data: data) {
+                self.lastResponse = weatherResponse
+                self.addData(currentWeather: weatherResponse)
                 DispatchQueue.main.async {
+                    print(weatherResponse)
                     self.updateUI(with: weatherResponse)
                 }
             }
         }
         dataTask.resume()
     }
-    
-    private func updateUI(with weatherResponse: WeatherResponse) {
-        locationLabel.text = weatherResponse.location.name
-        let temperature = celcius ? "\(weatherResponse.current.temp_c)C" : "\(weatherResponse.current.temp_f)F"
-        temperatureLabel.text = temperature
-        searchTextField.text = weatherResponse.location.name
-
-        let weatherCode = "\(weatherResponse.current.condition.code)"
-        test(weatherCode)
-    }
-
     
     private func getURL(query: String) -> URL? {
         let baseUrl = "https://api.weatherapi.com/v1/"
@@ -397,12 +425,28 @@ class ViewController: UIViewController, CLLocationManagerDelegate, UITextFieldDe
     }
     
     private func parseJson(data: Data) -> WeatherResponse? {
-        let decoder = JSONDecoder()
+        let jsonDecoder = JSONDecoder()
         do {
-            return try decoder.decode(WeatherResponse.self, from: data)
+            return try jsonDecoder.decode(WeatherResponse.self, from: data)
         } catch {
-            print("Error decoding")
+            print("Error decoding \(error)")
             return nil
+        }
+    }
+    
+    // MARK: Storing Data
+    
+    private func addData(currentWeather: WeatherResponse) {
+        items.append(currentWeather)
+        guard let dataPath = userDocuments.first?.appendingPathComponent("MyItems.plist") else {
+            return
+        }
+        do {
+            let data = try encoder.encode(items)
+            try data.write(to: dataPath)
+        }
+        catch {
+            print("\(error) : addData")
         }
     }
 }
